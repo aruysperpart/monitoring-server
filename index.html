@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Monitor kecepatan internet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=Pixelify+Sans:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #E8ECF0;
+    --ink: #18222E;
+    --muted: #5E6B78;
+    --panel: #08131F;
+    --bezel: #1C2733;
+    --glow: #8FE3FF;
+    --glow-dim: #6FA7BF;
+    --grid: #16293A;
+    --ok: #2F9E6B;
+    --warn: #E0623A;
+    --line: #C5CDD5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 16px/1.5 "IBM Plex Sans", system-ui, sans-serif;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 32px 20px 56px; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 4px; }
+  #status { margin: 0 0 20px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  #status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  #status.ok::before { background: var(--ok); }
+  #status.off::before { background: var(--warn); }
+
+  .screen {
+    background: var(--panel);
+    border: 10px solid var(--bezel);
+    border-radius: 20px;
+    padding: 18px 20px 12px;
+  }
+  .readout { display: flex; align-items: baseline; gap: 12px; color: var(--glow); }
+  #now { font: 500 clamp(56px, 14vw, 104px)/1 "Pixelify Sans", monospace; }
+  .unit { font: 500 1.5rem "Pixelify Sans", monospace; opacity: .8; }
+  .chart-wrap { height: 220px; margin-top: 14px; }
+  canvas { width: 100%; height: 100%; display: block; }
+  .axis { display: flex; justify-content: space-between; color: var(--glow-dim); font-size: .8rem; margin-top: 6px; }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 24px 0 0; padding-top: 14px; border-top: 1px solid var(--line); }
+  .stats dt { color: var(--muted); font-size: .875rem; }
+  .stats dd { margin: 2px 0 0; font-size: 1.5rem; font-weight: 600; }
+  .note { color: var(--muted); font-size: .875rem; margin: 24px 0 0; max-width: 60ch; }
+  @media (prefers-reduced-motion: no-preference) { #now { transition: opacity .2s; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Monitor kecepatan internet</h1>
+  <p id="status">Memuat data…</p>
+
+  <section class="screen" aria-label="Kecepatan internet terkini">
+    <div class="readout"><span id="now">--</span><span class="unit">Mbps</span></div>
+    <div class="chart-wrap"><canvas id="chart" role="img" aria-label="Grafik kecepatan internet"></canvas></div>
+    <div class="axis"><span id="from"></span><span>sekarang</span></div>
+  </section>
+
+  <dl class="stats">
+    <div><dt>Rata-rata</dt><dd id="avg">--</dd></div>
+    <div><dt>Tertinggi</dt><dd id="max">--</dd></div>
+    <div><dt>Terendah</dt><dd id="min">--</dd></div>
+  </dl>
+
+  <p class="note">Angka diukur oleh ESP8266 lewat unduhan uji, jadi menunjukkan tren koneksi di lokasi perangkat, bukan kecepatan maksimum paket internet Anda.</p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $("chart");
+const ctx = canvas.getContext("2d");
+let points = [];
+
+function ago(sec) {
+  if (sec < 90) return Math.round(sec) + " detik lalu";
+  if (sec < 5400) return Math.round(sec / 60) + " menit lalu";
+  return Math.round(sec / 3600) + " jam lalu";
+}
+
+async function load() {
+  let ok = true;
+  try {
+    const r = await fetch("/api/data?n=180", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    points = (await r.json()).points || [];
+  } catch (e) {
+    ok = false;
+  }
+  render(ok);
+}
+
+function render(ok) {
+  const last = points[points.length - 1];
+  const age = last ? (Date.now() - last.t) / 1000 : Infinity;
+  const online = ok && age < 45;
+
+  $("now").textContent = last ? last.mbps.toFixed(1) : "--";
+  $("status").textContent = !ok ? "Gagal memuat data. Mencoba lagi…"
+    : !last ? "Belum ada data dari perangkat"
+    : online ? "Perangkat terhubung"
+    : "Perangkat berhenti mengirim data sejak " + ago(age);
+  $("status").className = online ? "ok" : "off";
+
+  if (points.length) {
+    const v = points.map((p) => p.mbps);
+    $("avg").textContent = (v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) + " Mbps";
+    $("max").textContent = Math.max(...v).toFixed(1) + " Mbps";
+    $("min").textContent = Math.min(...v).toFixed(1) + " Mbps";
+    $("from").textContent = ago((Date.now() - points[0].t) / 1000);
+  }
+  draw();
+}
+
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr;
+  canvas.height = h * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+
+  const padL = 34, padT = 8, padB = 8;
+  const vals = points.map((p) => p.mbps);
+  const top = Math.max(5, Math.ceil(Math.max(0, ...vals) / 5) * 5);
+  const X = (i) => padL + (vals.length < 2 ? 0 : (i * (w - padL)) / (vals.length - 1));
+  const Y = (v) => padT + (1 - v / top) * (h - padT - padB);
+
+  ctx.font = '12px "IBM Plex Sans", sans-serif';
+  ctx.textBaseline = "middle";
+  for (let k = 0; k <= 4; k++) {
+    const v = (top * k) / 4, y = Y(v);
+    ctx.strokeStyle = "#16293A";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(w, y); ctx.stroke();
+    ctx.fillStyle = "#6FA7BF";
+    ctx.fillText(String(Math.round(v)), 0, y);
+  }
+  if (vals.length < 2) return;
+
+  ctx.beginPath();
+  vals.forEach((v, i) => (i ? ctx.lineTo(X(i), Y(v)) : ctx.moveTo(X(i), Y(v))));
+  ctx.strokeStyle = "#8FE3FF";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  ctx.lineTo(X(vals.length - 1), Y(0));
+  ctx.lineTo(X(0), Y(0));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(143, 227, 255, .10)";
+  ctx.fill();
+}
+
+window.addEventListener("resize", draw);
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>
